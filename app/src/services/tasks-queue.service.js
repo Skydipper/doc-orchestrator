@@ -3,14 +3,14 @@ const QueueService = require('services/queue.service');
 const TaskService = require('services/task.service');
 const DatasetService = require('services/dataset.service');
 const TaskAlreadyRunningError = require('errors/task-already-running.error');
-const { task, execution } = require('doc-importer-messages');
+const { task, execution } = require('rw-doc-importer-messages');
 const ExecutorTaskQueueService = require('services/executor-task-queue.service');
-const { TASKS_QUEUE } = require('app.constants');
+const config = require('config');
 
 class TasksQueueService extends QueueService {
 
     constructor() {
-        super(TASKS_QUEUE, true);
+        super(config.get('queues.tasks'), true);
         this.taskMsg = {};
         this.task = {};
     }
@@ -22,24 +22,27 @@ class TasksQueueService extends QueueService {
         this.taskMsg.taskId = this.taskMsg.id;
         switch (this.taskMsg.type) {
 
-        case task.MESSAGE_TYPES.TASK_CREATE:
-            executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CREATE, this.taskMsg);
-            break;
-        case task.MESSAGE_TYPES.TASK_CONCAT:
-            executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CONCAT, this.taskMsg);
-            break;
-        case task.MESSAGE_TYPES.TASK_DELETE:
-            executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_DELETE, this.taskMsg);
-            break;
-        case task.MESSAGE_TYPES.TASK_OVERWRITE:
-            // first step is creating the index, then we will catch the WRITTEN_DATA to delete the previous INDEX
-            executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CREATE, this.taskMsg);
-            break;
-        case task.MESSAGE_TYPES.TASK_DELETE_INDEX:
-            executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_DELETE_INDEX, this.taskMsg);
-            break;
-        default:
-            logger.info('Default');
+            case task.MESSAGE_TYPES.TASK_CREATE:
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CREATE, this.taskMsg);
+                break;
+            case task.MESSAGE_TYPES.TASK_CONCAT:
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CONCAT, this.taskMsg);
+                break;
+            case task.MESSAGE_TYPES.TASK_APPEND:
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_APPEND, this.taskMsg);
+                break;
+            case task.MESSAGE_TYPES.TASK_DELETE:
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_DELETE, this.taskMsg);
+                break;
+            case task.MESSAGE_TYPES.TASK_OVERWRITE:
+                // first step is creating the index, then we will catch the WRITTEN_DATA to delete the previous INDEX
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_CREATE, this.taskMsg);
+                break;
+            case task.MESSAGE_TYPES.TASK_DELETE_INDEX:
+                executorTaskMessage = execution.createMessage(execution.MESSAGE_TYPES.EXECUTION_DELETE_INDEX, this.taskMsg);
+                break;
+            default:
+                logger.info('Default');
 
         }
         await ExecutorTaskQueueService.sendMessage(executorTaskMessage);
@@ -47,7 +50,7 @@ class TasksQueueService extends QueueService {
     }
 
     async consume(msg) {
-        logger.info('Message received in DOC-TASKS');
+        logger.info(`Message received in ${config.get('queues.tasks')}`);
         this.taskMsg = JSON.parse(msg.content.toString());
         try {
             // check if any task is currently running for this dataset
@@ -61,13 +64,13 @@ class TasksQueueService extends QueueService {
             // Process message
             await this.processMessage();
             // All OK -> msg sent, so ack emitted
-            this.channel.ack(msg);
-            logger.debug('msg accepted');
+            await this.channel.ack(msg);
+            logger.debug(`${config.get('queues.tasks')} queue message acknowledged`);
         } catch (err) {
             // Error creating entity or sending to queue
             logger.error(err);
             // Accept the message
-            this.channel.ack(msg);
+            await this.channel.ack(msg);
             // Delete mongo task entity
             await TaskService.delete(this.task._id);
             // Update DatasetService

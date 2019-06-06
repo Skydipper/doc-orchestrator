@@ -2,9 +2,75 @@ const logger = require('logger');
 const Task = require('models/task.model');
 const TaskNotFound = require('errors/task-not-found.error');
 const TaskAlreadyRunningError = require('errors/task-already-running.error');
-const STATUS = require('app.constants').STATUS;
+const { TASK_STATUS } = require('app.constants');
+const elasticService = require('services/elastic.service');
 
 class TaskService {
+
+    static getFilteredQuery(query) {
+        const allowedSearchFields = {
+            type: 'type',
+            status: 'status',
+            datasetId: 'datasetId',
+            createdAt: 'createdAt',
+            updatedAt: 'updatedAt',
+            createdBefore: 'createdAt',
+            createdAfter: 'createdAt',
+            updatedBefore: 'updatedAt',
+            updatedAfter: 'updatedAt'
+        };
+        const filteredQuery = {};
+
+        logger.debug('Object.keys(query)', Object.keys(query));
+        Object.keys(query).filter(param => Object.prototype.hasOwnProperty.call(allowedSearchFields, param)).forEach((param) => {
+            switch (Task.schema.paths[allowedSearchFields[param]].instance) {
+
+                case 'String':
+                    filteredQuery[param] = {
+                        $regex: query[param],
+                        $options: 'i'
+                    };
+                    break;
+                case 'Array':
+                    if (query[param].indexOf('@') >= 0) {
+                        filteredQuery[param] = {
+                            $all: query[param].split('@').map(elem => elem.trim())
+                        };
+                    } else {
+                        filteredQuery[param] = {
+                            $in: query[param].split(',').map(elem => elem.trim())
+                        };
+                    }
+                    break;
+                case 'Mixed':
+                    filteredQuery[param] = { $ne: null };
+                    break;
+                case 'Date':
+                    filteredQuery[allowedSearchFields[param]] = filteredQuery[allowedSearchFields[param]] || {};
+                    switch (param) {
+
+                        case 'createdBefore':
+                        case 'updatedBefore':
+                            filteredQuery[allowedSearchFields[param]].$lte = new Date(query[param]);
+                            break;
+                        case 'createdAfter':
+                        case 'updatedAfter':
+                            filteredQuery[allowedSearchFields[param]].$gte = new Date(query[param]);
+                            break;
+                        default:
+                            filteredQuery[allowedSearchFields[param]].$eq = new Date(query[param]);
+                            break;
+
+                    }
+                    break;
+                default:
+
+            }
+        });
+        logger.debug(filteredQuery);
+        return filteredQuery;
+    }
+
 
     static async get(id) {
         logger.debug(`[TaskService]: Getting task with id: ${id}`);
@@ -14,6 +80,23 @@ class TaskService {
             logger.error(`[TaskService]: Task with id ${id} not found`);
             throw new TaskNotFound(`Task with id '${id}' not found`);
         }
+
+        await Promise.all(task.logs.map(async (log, index) => {
+            if (!log.elasticTaskId) {
+                return Promise.resolve();
+            }
+            logger.debug(`[TaskRouter] Getting Elasticsearch task data for elasticsearchTaskIds: ${log.elasticTaskId}`);
+
+
+            try {
+                task.logs[index].elasticTaskStatus = await elasticService.getTaskStatus(log.elasticTaskId);
+            } catch (err) {
+                task.logs[index].elasticTaskStatus = err;
+            }
+
+            return Promise.resolve();
+        }));
+
         return task;
     }
 
@@ -71,7 +154,27 @@ class TaskService {
     static async getAll(query = {}) {
         logger.debug(`[TaskService]: Getting all tasks`);
         logger.debug(`[DBACCESS-FIND]: tasks`);
-        const tasks = await Task.find(query);
+        const filteredQuery = TaskService.getFilteredQuery(Object.assign({}, query));
+        const tasks = await Task.find(filteredQuery);
+
+        await Promise.all(tasks.map(async (task) => {
+            await Promise.all(task.logs.map(async (log, logIndex) => {
+                if (!log.elasticTaskId) {
+                    return Promise.resolve();
+                }
+                logger.debug(`[TaskRouter] Getting Elasticsearch task data for elasticsearchTaskIds: ${log.elasticTaskId}`);
+
+
+                try {
+                    task.logs[logIndex].elasticTaskStatus = await elasticService.getTaskStatus(log.elasticTaskId);
+                } catch (err) {
+                    task.logs[logIndex].elasticTaskStatus = err;
+                }
+
+                return Promise.resolve();
+            }));
+        }));
+
         return tasks;
     }
 
@@ -99,7 +202,7 @@ class TaskService {
         logger.debug(`[TaskService]: checking counter of task with id:  ${id}`);
         logger.debug(`[DBACCESS-FIND]: task.id: ${id}`);
         const task = await TaskService.get(id);
-        if ((task.writes - task.reads === 0) && (task.status === STATUS.READ)) {
+        if ((task.writes - task.reads === 0) && (task.status === TASK_STATUS.READ)) {
             return true;
         }
         return false;
@@ -109,7 +212,7 @@ class TaskService {
         logger.debug(`[TaskService]: checking running task for datasetId:  ${datasetId}`);
         logger.debug(`[DBACCESS-FIND]: task.datasetId: ${datasetId}`);
         const tasks = await Task.find({ datasetId }).exec();
-        const runningTask = tasks.find(task => ((task.status !== STATUS.SAVED) && (task.status !== STATUS.ERROR)));
+        const runningTask = tasks.find(task => ((task.status !== TASK_STATUS.SAVED) && (task.status !== TASK_STATUS.ERROR)));
         if (runningTask) {
             throw new TaskAlreadyRunningError(`Task with datasetId '${datasetId}' already running`);
         }
