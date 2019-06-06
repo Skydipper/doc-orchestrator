@@ -10,7 +10,7 @@ cache:
   - "node_modules"
 env:
   global:
-    - CC_TEST_REPORTER_ID=55b8f06127da6d2d99d23008642070c10bd8e599e0a8cfa81049e7dab0a39ea5
+    - CC_TEST_REPORTER_ID=337ba8a638988b8db29d7ab10c1bae8d81786d7416ccc982e72148e573242a55
     - NODE_ENV=test
     - PORT=5037
     - CT_URL=http://127.0.0.1:9000
